@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]  # raiz do repo
 
+
 class Settings(BaseSettings):
     CORS_ALLOWED_ORIGINS: List[str] = []
     AUTH_ISSUER: str
@@ -19,5 +20,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",  # <= ignora chaves que não existem no modelo
     )
+
 
 settings = Settings()

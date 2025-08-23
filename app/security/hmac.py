@@ -1,7 +1,9 @@
 # app/security/hmac.py
-import hmac, hashlib
+import hmac
+import hashlib
 from fastapi import Header, HTTPException, Request
 from app.core.config import settings
+
 
 async def require_hmac(
     request: Request,

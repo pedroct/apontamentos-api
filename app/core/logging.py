@@ -1,6 +1,9 @@
 # app/core/logging.py
-import logging, sys, json
+import logging
+import sys
+import json
 from app.core.config import settings
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
@@ -12,6 +15,7 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             base["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(base, ensure_ascii=False)
+
 
 def setup_logging():
     root = logging.getLogger()

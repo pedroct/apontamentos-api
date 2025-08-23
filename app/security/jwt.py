@@ -4,6 +4,7 @@ from jose import jwt, jwk
 from app.core.config import settings
 from app.security.jwks_cache import get_jwks  # cache com TTL
 
+
 async def require_jwt(request: Request, authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing bearer token")
