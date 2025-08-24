@@ -6,7 +6,7 @@ permissions:
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   REGISTRY: ghcr.io
@@ -20,12 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to GHCR (PAT)
+      # Autentica no GHCR usando o GITHUB_TOKEN (escopo packages:write já definido)
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ secrets.GHCR_USERNAME }}
-          password: ${{ secrets.GHCR_PAT }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
 
       - name: Build & Push image
         run: |
@@ -33,33 +35,42 @@ jobs:
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
 
-      - name: Check SSH connectivity
+      # (Opcional porém recomendado) fixa host key antes de conectar
+      - name: Cache server host key (port 2222)
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -p 2222 "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Check SSH connectivity (TCP 2222)
         run: |
           set -euxo pipefail
           getent ahostsv4 "${{ secrets.SSH_HOST }}" || true
-          # tenta TCP connect (10s)
-          timeout 10 bash -c "exec 3<>/dev/tcp/${{ secrets.SSH_HOST }}/22" && echo "TCP 22 open" || (echo "TCP 22 closed" && exit 1)
+          # tenta TCP connect (10s) na 2222
+          timeout 10 bash -c "exec 3<>/dev/tcp/${{ secrets.SSH_HOST }}/2222" && echo "TCP 2222 open"
 
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
-          # Sempre alterar o host para o IP público atual
-          host: 201.51.130.202
-          username: ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          # Portal 2222 configurada no Mikrotik para redirecionar para a 22 do 192.168.1.158
-          port: 2222
+          host: ${{ secrets.SSH_HOST }}          # 201.51.130.202
+          username: pedroct                      # ou ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}       # chave privada correspondente ao authorized_keys no servidor
+          port: 2222                             # DNAT no Mikrotik -> 192.168.1.158:22
           timeout: 2m
           command_timeout: 15m
           script: |
             set -euo pipefail
             APP_DIR="/home/pedroct/apps/apontamentos-api"
-            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+
+            # Login no GHCR dentro do servidor para puxar as imagens
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
             cd "$APP_DIR"
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
-            # health local (backend)
+
+            # Health local do backend (ajuste porta/path se necessário)
             for i in {1..30}; do
               curl -fsS http://127.0.0.1:8000/healthz && break || sleep 2
             done
