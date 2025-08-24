@@ -11,7 +11,7 @@ from app.api.routes import router as api_router
 
 setup_logging()
 
-app = FastAPI(title="API")
+app = FastAPI(title="api-apontamentos")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +24,7 @@ app.add_middleware(
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True}
+    return {"status": "ok"}
 
 
 @app.get("/readyz")

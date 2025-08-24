@@ -1,52 +1,63 @@
-name: Build & Deploy
+name: Deploy to Production
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  IMAGE: ghcr.io/${{ github.repository }}
+  PUBLIC_HEALTH_URL: https://api-apontamentos.pedroct.com.br/healthz
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Vars
-        id: v
-        run: |
-          echo "IMAGE=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
-          echo "TAG=${{ github.sha }}" >> $GITHUB_OUTPUT
-
-      - name: Login GHCR
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build
+      - name: Build & Push image
         run: |
-          docker build -t ${{ steps.v.outputs.IMAGE }}:${{ steps.v.outputs.TAG }} .
-          docker tag  ${{ steps.v.outputs.IMAGE }}:${{ steps.v.outputs.TAG }} ${{ steps.v.outputs.IMAGE }}:latest
+          docker build -t "${IMAGE}:${GITHUB_SHA}" -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
 
-      - name: Push
-        run: |
-          docker push ${{ steps.v.outputs.IMAGE }}:${{ steps.v.outputs.TAG }}
-          docker push ${{ steps.v.outputs.IMAGE }}:latest
-
-      - name: Deploy via SSH
+      - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}   # ex.: pedroct
-          key: ${{ secrets.SSH_KEY }}
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
           script: |
-            REPO="$(basename $GITHUB_REPOSITORY)"
-            APP_DIR="/home/pedroct/apps/$REPO"
-            docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+            set -euo pipefail
+            APP_DIR="/home/pedroct/apps/apontamentos-api"
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
             cd "$APP_DIR"
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
+            # health local (backend)
+            for i in {1..30}; do
+              curl -fsS http://127.0.0.1:8000/healthz && break || sleep 2
+            done
+
+      - name: Public smoke test (HTTPS)
+        run: |
+          for i in {1..30}; do
+            code=$(curl -sk -o /dev/null -w "%{http_code}" "${PUBLIC_HEALTH_URL}")
+            if [ "$code" = "200" ]; then
+              echo "OK ${PUBLIC_HEALTH_URL}"
+              curl -fsS "${PUBLIC_HEALTH_URL}"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Falha no smoke test público em ${PUBLIC_HEALTH_URL}"
+          exit 1

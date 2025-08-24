@@ -1,8 +1,5 @@
 from fastapi import APIRouter
+from app.routers import atividades
 
 router = APIRouter()
-
-
-@router.get("/ping")
-async def ping():
-    return {"pong": True}
+router.include_router(atividades.router)  # fica /api/atividades

@@ -11,3 +11,15 @@ build/
 .pytest_cache/
 .mypy_cache/
 .alembic/
+# envs locais
+.env
+.env.*
+!.env.example
+
+# artefatos python
+*.egg-info/
+__pycache__/
+*.pyc
+
+# docker
+*.log
