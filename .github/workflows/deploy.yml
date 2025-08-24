@@ -33,12 +33,22 @@ jobs:
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
 
+      - name: Check SSH connectivity
+        run: |
+          set -euxo pipefail
+          getent ahostsv4 "${{ secrets.SSH_HOST }}" || true
+          # tenta TCP connect (10s)
+          timeout 10 bash -c "exec 3<>/dev/tcp/${{ secrets.SSH_HOST }}/22" && echo "TCP 22 open" || (echo "TCP 22 closed" && exit 1)
+
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.PROD_HOST }}
           username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
+          port: 22
+          timeout: 2m
+          command_timeout: 15m
           script: |
             set -euo pipefail
             APP_DIR="/home/pedroct/apps/apontamentos-api"
