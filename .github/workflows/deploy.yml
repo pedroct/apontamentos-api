@@ -20,7 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Autentica no GHCR usando o GITHUB_TOKEN (escopo packages:write já definido)
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -35,7 +34,6 @@ jobs:
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
 
-      # (Opcional porém recomendado) fixa host key antes de conectar - corrigido
       - name: Cache server host key (port 2222)
         run: |
           mkdir -p ~/.ssh
@@ -46,24 +44,54 @@ jobs:
         run: |
           set -euxo pipefail
           getent ahostsv4 "api-apontamentos.pedroct.com.br" || true
-          # tenta TCP connect (10s) na 2222
           timeout 10 bash -c "exec 3<>/dev/tcp/api-apontamentos.pedroct.com.br/2222" && echo "TCP 2222 open"
 
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: api-apontamentos.pedroct.com.br   # DNS do servidor (porta DNAT 2222)
+          host: api-apontamentos.pedroct.com.br
           username: pedroct
-          key: ${{ secrets.PROD_SSH_KEY }}        # chave privada correspondente ao authorized_keys no servidor
+          key: ${{ secrets.PROD_SSH_KEY }}
           port: 2222
           timeout: 2m
           command_timeout: 15m
           script: |
             set -euo pipefail
+
             APP_DIR="/home/pedroct/apps/apontamentos-api"
             SERVICE="api"  # nome do serviço no docker-compose.yml
+            ENV_FILE="${APP_DIR}/.env"   # docker compose lê .env por padrão nesse diretório
 
-            # Login no GHCR dentro do servidor para puxar as imagens
+            # 1) Atualiza/gera .env com SECRETS do GitHub - secrets criadas
+            install -d -m 0755 "$APP_DIR"
+            umask 077
+            tmpenv="$(mktemp)"
+            cat > "$tmpenv" <<'EOF'
+            # ==== app required settings ====
+            # Ajuste os nomes das chaves abaixo para os exigidos pelo seu Settings (Pydantic)
+            APP_ENV=production
+            LOG_LEVEL=${{ secrets.LOG_LEVEL || 'INFO' }}
+
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            JWT_ALGORITHM=${{ secrets.JWT_ALGORITHM || 'HS256' }}
+            ACCESS_TOKEN_EXPIRE_MINUTES=${{ secrets.ACCESS_TOKEN_EXPIRE_MINUTES || '60' }}
+
+            # CORS / Hosts
+            CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS || 'https://apontamentos.pedroct.com.br,https://api-apontamentos.pedroct.com.br' }}
+            ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS || 'api-apontamentos.pedroct.com.br' }}
+
+            # Observability (opcional)
+            SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+            # ==== end ====
+            EOF
+            mv "$tmpenv" "$ENV_FILE"
+
+            # 2) (Opcional) Mostra apenas as CHAVES presentes (sem vazar valores)
+            echo "Env keys presentes no ${ENV_FILE}:"
+            sed -E 's/^(.*)=.*$/\1=****/' "$ENV_FILE" | grep -v '^\s*$' || true
+
+            # 3) Login no GHCR e rollout
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             cd "$APP_DIR"
@@ -71,7 +99,7 @@ jobs:
             docker compose up -d --remove-orphans
             docker image prune -f
 
-            # Aguarda o container subir
+            # 4) Aguarda container ficar running
             for i in {1..30}; do
               if docker compose ps --status=running | grep -q "$SERVICE"; then
                 echo "Serviço $SERVICE está em execução."
@@ -85,7 +113,7 @@ jobs:
               fi
             done
 
-            # Tenta usar HEALTHCHECK do Docker, se existir; se não, faz curl de dentro do container
+            # 5) Healthcheck do Docker (ou fallback interno)
             CID=$(docker compose ps -q "$SERVICE" || true)
             if [ -n "$CID" ] && docker inspect "$CID" | grep -q '"Health"'; then
               echo "Aguardando HEALTHCHECK do Docker ficar healthy..."
@@ -97,6 +125,9 @@ jobs:
                 if [ "$i" -eq 60 ]; then
                   echo "Health do Docker não ficou healthy em tempo hábil."
                   docker logs --tail=200 "$CID" || true
+                  # Mostra variáveis vistas pelo processo (sem valores)
+                  echo "Variáveis de ambiente no container:"
+                  docker exec "$CID" /bin/sh -lc 'env | sed -E "s/^(.*)=.*$/\1=****/" | sort' || true
                   exit 1
                 fi
               done
@@ -111,6 +142,7 @@ jobs:
                 if [ "$i" -eq 60 ]; then
                   echo "Health interno falhou."
                   [ -n "$CID" ] && docker logs --tail=200 "$CID" || true
+                  docker compose ps || true
                   exit 1
                 fi
               done
@@ -118,7 +150,6 @@ jobs:
 
       - name: Public smoke test (HTTPS)
         run: |
-          # tenta por até 2 minutos (60 tentativas x 2s)
           for i in {1..60}; do
             code=$(curl -sk -o /dev/null -w "%{http_code}" "${PUBLIC_HEALTH_URL}")
             if [ "$code" = "200" ]; then
