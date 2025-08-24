@@ -8,15 +8,48 @@ on:
   push:
     branches: ["main"]
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   IMAGE: ghcr.io/${{ github.repository }}
   PUBLIC_HEALTH_URL: https://api-apontamentos.pedroct.com.br/healthz
 
+  # Credenciais para login no GHCR dentro do servidor
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===== App config (preencha via Secrets) =====
+  APP_ENV: production
+  LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
+
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  JWT_SECRET: ${{ secrets.JWT_SECRET }}
+  JWT_ALGORITHM: ${{ secrets.JWT_ALGORITHM || 'HS256' }}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${{ secrets.ACCESS_TOKEN_EXPIRE_MINUTES || '60' }}
+
+  # IMPORTANTe: mantenha este valor como JSON para o Pydantic Settings (list[str])
+  CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS || '["https://apontamentos.pedroct.com.br","https://api-apontamentos.pedroct.com.br"]' }}
+  ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS || 'api-apontamentos.pedroct.com.br' }}
+
+  # Observability
+  SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+  SENTRY_TRACES_SAMPLE_RATE: ${{ secrets.SENTRY_TRACES_SAMPLE_RATE || '0.2' }}
+  SENTRY_PROFILES_SAMPLE_RATE: ${{ secrets.SENTRY_PROFILES_SAMPLE_RATE || '0.0' }}
+
+  # Auth (OIDC/JWT)
+  AUTH_ISSUER: ${{ secrets.AUTH_ISSUER }}
+  AUTH_AUDIENCE: ${{ secrets.AUTH_AUDIENCE }}
+  JWKS_URL: ${{ secrets.JWKS_URL }}
+  # ============================================
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -29,18 +62,22 @@ jobs:
           logout: true
 
       - name: Build & Push image
+        shell: bash
         run: |
+          set -euo pipefail
           docker build -t "${IMAGE}:${GITHUB_SHA}" -t "${IMAGE}:latest" .
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
 
       - name: Cache server host key (port 2222)
+        shell: bash
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           ssh-keyscan -p 2222 "api-apontamentos.pedroct.com.br" >> ~/.ssh/known_hosts
 
       - name: Check SSH connectivity (TCP 2222)
+        shell: bash
         run: |
           set -euxo pipefail
           getent ahostsv4 "api-apontamentos.pedroct.com.br" || true
@@ -48,28 +85,6 @@ jobs:
 
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
-        env:
-          # ==== App config (defaults + secrets) ====
-          APP_ENV: production
-          LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
-
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          JWT_ALGORITHM: ${{ secrets.JWT_ALGORITHM || 'HS256' }}
-          ACCESS_TOKEN_EXPIRE_MINUTES: ${{ secrets.ACCESS_TOKEN_EXPIRE_MINUTES || '60' }}
-
-          # CORS / Hosts
-          CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS || 'https://apontamentos.pedroct.com.br,https://api-apontamentos.pedroct.com.br' }}
-          ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS || 'api-apontamentos.pedroct.com.br' }}
-
-          # Observability
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          SENTRY_TRACES_SAMPLE_RATE: ${{ secrets.SENTRY_TRACES_SAMPLE_RATE || '0.2' }}
-          SENTRY_PROFILES_SAMPLE_RATE: ${{ secrets.SENTRY_PROFILES_SAMPLE_RATE || '0.0' }}
-
-          # GHCR login on remote host
-          GHCR_USERNAME: pedroct
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: api-apontamentos.pedroct.com.br
           username: pedroct
@@ -77,8 +92,8 @@ jobs:
           port: 2222
           timeout: 2m
           command_timeout: 15m
-          # Make these envs available inside the remote shell:
-          envs: APP_ENV,LOG_LEVEL,DATABASE_URL,JWT_SECRET,JWT_ALGORITHM,ACCESS_TOKEN_EXPIRE_MINUTES,CORS_ALLOWED_ORIGINS,ALLOWED_HOSTS,SENTRY_DSN,SENTRY_TRACES_SAMPLE_RATE,SENTRY_PROFILES_SAMPLE_RATE,GHCR_USERNAME,GHCR_TOKEN
+          # passe TODAS as envs que o script usa:
+          envs: APP_ENV,LOG_LEVEL,DATABASE_URL,JWT_SECRET,JWT_ALGORITHM,ACCESS_TOKEN_EXPIRE_MINUTES,CORS_ALLOWED_ORIGINS,ALLOWED_HOSTS,SENTRY_DSN,SENTRY_TRACES_SAMPLE_RATE,SENTRY_PROFILES_SAMPLE_RATE,AUTH_ISSUER,AUTH_AUDIENCE,JWKS_URL,GHCR_USERNAME,GHCR_TOKEN,IMAGE
           script: |
             set -euo pipefail
 
@@ -100,7 +115,7 @@ jobs:
             JWT_ALGORITHM=${JWT_ALGORITHM}
             ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES}
 
-            # CORS / Hosts
+            # CORS / Hosts (CORS_ALLOWED_ORIGINS DEVE SER JSON ex.: ["https://a","https://b"])
             CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
             ALLOWED_HOSTS=${ALLOWED_HOSTS}
 
@@ -108,6 +123,11 @@ jobs:
             SENTRY_DSN=${SENTRY_DSN}
             SENTRY_TRACES_SAMPLE_RATE=${SENTRY_TRACES_SAMPLE_RATE}
             SENTRY_PROFILES_SAMPLE_RATE=${SENTRY_PROFILES_SAMPLE_RATE}
+
+            # Auth (OIDC/JWT)
+            AUTH_ISSUER=${AUTH_ISSUER}
+            AUTH_AUDIENCE=${AUTH_AUDIENCE}
+            JWKS_URL=${JWKS_URL}
             # ==== end ====
             EOF
             mv "$tmpenv" "$ENV_FILE"
@@ -120,6 +140,9 @@ jobs:
             echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
 
             cd "$APP_DIR"
+
+            # Garante que o docker-compose está apontando para a tag 'latest' do IMAGE (caso use variável)
+            # e faz rollout
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
@@ -173,6 +196,7 @@ jobs:
             fi
 
       - name: Public smoke test (HTTPS)
+        shell: bash
         run: |
           for i in {1..60}; do
             code=$(curl -sk -o /dev/null -w "%{http_code}" "${PUBLIC_HEALTH_URL}")
