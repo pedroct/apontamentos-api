@@ -35,7 +35,7 @@ jobs:
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
 
-      # (Opcional porém recomendado) fixa host key antes de conectar
+      # (Opcional porém recomendado) fixa host key antes de conectar - corrigido
       - name: Cache server host key (port 2222)
         run: |
           mkdir -p ~/.ssh
@@ -52,15 +52,16 @@ jobs:
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: api-apontamentos.pedroct.com.br #${{ secrets.SSH_HOST }}          # 201.51.130.202
-          username: pedroct                      # ou ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}       # chave privada correspondente ao authorized_keys no servidor
-          port: 2222                             # DNAT no Mikrotik -> 192.168.1.158:22
+          host: api-apontamentos.pedroct.com.br   # DNS do servidor (porta DNAT 2222)
+          username: pedroct
+          key: ${{ secrets.PROD_SSH_KEY }}        # chave privada correspondente ao authorized_keys no servidor
+          port: 2222
           timeout: 2m
           command_timeout: 15m
           script: |
             set -euo pipefail
             APP_DIR="/home/pedroct/apps/apontamentos-api"
+            SERVICE="api"  # nome do serviço no docker-compose.yml
 
             # Login no GHCR dentro do servidor para puxar as imagens
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -70,14 +71,55 @@ jobs:
             docker compose up -d --remove-orphans
             docker image prune -f
 
-            # Health local do backend (ajuste porta/path se necessário)
+            # Aguarda o container subir
             for i in {1..30}; do
-              curl -fsS http://127.0.0.1:8000/healthz && break || sleep 2
+              if docker compose ps --status=running | grep -q "$SERVICE"; then
+                echo "Serviço $SERVICE está em execução."
+                break
+              fi
+              sleep 2
+              if [ "$i" -eq 30 ]; then
+                echo "Serviço $SERVICE não ficou running a tempo."
+                docker compose ps || true
+                exit 1
+              fi
             done
+
+            # Tenta usar HEALTHCHECK do Docker, se existir; se não, faz curl de dentro do container
+            CID=$(docker compose ps -q "$SERVICE" || true)
+            if [ -n "$CID" ] && docker inspect "$CID" | grep -q '"Health"'; then
+              echo "Aguardando HEALTHCHECK do Docker ficar healthy..."
+              for i in {1..60}; do
+                status=$(docker inspect -f '{{.State.Health.Status}}' "$CID" || echo "unknown")
+                echo "Health status: $status"
+                [ "$status" = "healthy" ] && { echo "Health OK (Docker HEALTHCHECK)."; break; }
+                sleep 2
+                if [ "$i" -eq 60 ]; then
+                  echo "Health do Docker não ficou healthy em tempo hábil."
+                  docker logs --tail=200 "$CID" || true
+                  exit 1
+                fi
+              done
+            else
+              echo "Sem HEALTHCHECK no Docker; testando endpoint /healthz de dentro do container…"
+              for i in {1..60}; do
+                if docker compose exec -T "$SERVICE" sh -lc 'curl -fsS http://127.0.0.1:8000/healthz >/dev/null'; then
+                  echo "Local health OK (in-container)."
+                  break
+                fi
+                sleep 2
+                if [ "$i" -eq 60 ]; then
+                  echo "Health interno falhou."
+                  [ -n "$CID" ] && docker logs --tail=200 "$CID" || true
+                  exit 1
+                fi
+              done
+            fi
 
       - name: Public smoke test (HTTPS)
         run: |
-          for i in {1..30}; do
+          # tenta por até 2 minutos (60 tentativas x 2s)
+          for i in {1..60}; do
             code=$(curl -sk -o /dev/null -w "%{http_code}" "${PUBLIC_HEALTH_URL}")
             if [ "$code" = "200" ]; then
               echo "OK ${PUBLIC_HEALTH_URL}"
