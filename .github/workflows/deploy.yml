@@ -52,7 +52,7 @@ jobs:
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.SSH_HOST }}          # 201.51.130.202
+          host: api-apontamentos.pedroct.com.br #${{ secrets.SSH_HOST }}          # 201.51.130.202
           username: pedroct                      # ou ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}       # chave privada correspondente ao authorized_keys no servidor
           port: 2222                             # DNAT no Mikrotik -> 192.168.1.158:22
