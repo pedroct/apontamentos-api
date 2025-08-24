@@ -43,10 +43,12 @@ jobs:
       - name: SSH into server and deploy
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.PROD_HOST }}
+          # Sempre alterar o host para o IP público atual
+          host: 201.51.130.202
           username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
-          port: 22
+          # Portal 2222 configurada no Mikrotik para redirecionar para a 22 do 192.168.1.158
+          port: 2222
           timeout: 2m
           command_timeout: 15m
           script: |
