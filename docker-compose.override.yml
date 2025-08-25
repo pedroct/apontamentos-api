@@ -1,0 +1,8 @@
+# docker-compose.override.yml (somente para DESENVOLVIMENTO)
+services:
+  api:
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - API_ENV=development
+    volumes:
+      - .:/app  # hot reload

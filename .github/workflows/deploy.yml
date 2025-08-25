@@ -1,207 +1,121 @@
 name: Deploy to Production
 
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
 permissions:
   contents: read
   packages: write
-
-on:
-  push:
-    branches: ["main"]
-
-concurrency:
-  group: production-deploy
-  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   IMAGE: ghcr.io/${{ github.repository }}
-  PUBLIC_HEALTH_URL: https://api-apontamentos.pedroct.com.br/healthz
-
-  # Credenciais para login no GHCR dentro do servidor
-  GHCR_USERNAME: ${{ github.actor }}
-  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ===== App config (preencha via Secrets) =====
-  APP_ENV: production
-  LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
-
-  DATABASE_URL: ${{ secrets.DATABASE_URL }}
-  JWT_SECRET: ${{ secrets.JWT_SECRET }}
-  JWT_ALGORITHM: ${{ secrets.JWT_ALGORITHM || 'HS256' }}
-  ACCESS_TOKEN_EXPIRE_MINUTES: ${{ secrets.ACCESS_TOKEN_EXPIRE_MINUTES || '60' }}
-
-  # IMPORTANTe: mantenha este valor como JSON para o Pydantic Settings (list[str])
-  CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS || '["https://apontamentos.pedroct.com.br","https://api-apontamentos.pedroct.com.br"]' }}
-  ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS || 'api-apontamentos.pedroct.com.br' }}
-
-  # Observability
-  SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-  SENTRY_TRACES_SAMPLE_RATE: ${{ secrets.SENTRY_TRACES_SAMPLE_RATE || '0.2' }}
-  SENTRY_PROFILES_SAMPLE_RATE: ${{ secrets.SENTRY_PROFILES_SAMPLE_RATE || '0.0' }}
-
-  # Auth (OIDC/JWT)
-  AUTH_ISSUER: ${{ secrets.AUTH_ISSUER }}
-  AUTH_AUDIENCE: ${{ secrets.AUTH_AUDIENCE }}
-  JWKS_URL: ${{ secrets.JWKS_URL }}
-  # ============================================
 
 jobs:
-  build-and-deploy:
+  build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      sha: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Log in to GHCR
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          logout: true
 
-      - name: Build & Push image
-        shell: bash
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=prod-latest
+            type=sha,format=short
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ secrets.PUBLIC_HEALTH_URL }}
+    steps:
+      - name: Derive repo vars
+        id: prep
         run: |
-          set -euo pipefail
-          docker build -t "${IMAGE}:${GITHUB_SHA}" -t "${IMAGE}:latest" .
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          docker push "${IMAGE}:latest"
+          IFS='/' read -r OWNER REPO <<< "${GITHUB_REPOSITORY}"
+          echo "OWNER=$OWNER" >> $GITHUB_OUTPUT
+          echo "REPO=$REPO" >> $GITHUB_OUTPUT
 
-      - name: Cache server host key (port 2222)
-        shell: bash
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          ssh-keyscan -p 2222 "api-apontamentos.pedroct.com.br" >> ~/.ssh/known_hosts
-
-      - name: Check SSH connectivity (TCP 2222)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          getent ahostsv4 "api-apontamentos.pedroct.com.br" || true
-          timeout 10 bash -c "exec 3<>/dev/tcp/api-apontamentos.pedroct.com.br/2222" && echo "TCP 2222 open"
-
-      - name: SSH into server and deploy
+      - name: SSH | Pull & Restart
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: api-apontamentos.pedroct.com.br
-          username: pedroct
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
-          port: 2222
-          timeout: 2m
-          command_timeout: 15m
-          # passe TODAS as envs que o script usa:
-          envs: APP_ENV,LOG_LEVEL,DATABASE_URL,JWT_SECRET,JWT_ALGORITHM,ACCESS_TOKEN_EXPIRE_MINUTES,CORS_ALLOWED_ORIGINS,ALLOWED_HOSTS,SENTRY_DSN,SENTRY_TRACES_SAMPLE_RATE,SENTRY_PROFILES_SAMPLE_RATE,AUTH_ISSUER,AUTH_AUDIENCE,JWKS_URL,GHCR_USERNAME,GHCR_TOKEN,IMAGE
+          port: ${{ secrets.PROD_SSH_PORT }}
+          script_stop: true
           script: |
-            set -euo pipefail
+            set -euxo pipefail
 
-            APP_DIR="/home/pedroct/apps/apontamentos-api"
-            SERVICE="api"                            # nome do serviço no docker-compose.yml
-            ENV_FILE="${APP_DIR}/.env"               # docker compose lê .env por padrão nesse diretório
+            export COMPOSE_DIR="${{ secrets.COMPOSE_DIR || '/home/pedroct/apps/apontamentos-api' }}"
+            export GITHUB_OWNER="${{ steps.prep.outputs.OWNER }}"
+            export GITHUB_REPO="${{ steps.prep.outputs.REPO }}"
+            export IMAGE_TAG="${{ needs.build-and-push.outputs.sha }}"
 
-            # 1) Atualiza/gera .env com valores REAIS
-            install -d -m 0755 "$APP_DIR"
-            umask 077
-            tmpenv="$(mktemp)"
-            cat > "$tmpenv" <<EOF
-            # ==== app required settings ====
-            APP_ENV=${APP_ENV}
-            LOG_LEVEL=${LOG_LEVEL}
+            cd "$COMPOSE_DIR"
 
-            DATABASE_URL=${DATABASE_URL}
-            JWT_SECRET=${JWT_SECRET}
-            JWT_ALGORITHM=${JWT_ALGORITHM}
-            ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES}
+            # login no GHCR (imagens privadas)
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.PROD_GHCR_USER }}" --password-stdin
 
-            # CORS / Hosts (CORS_ALLOWED_ORIGINS DEVE SER JSON ex.: ["https://a","https://b"])
-            CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
-            ALLOWED_HOSTS=${ALLOWED_HOSTS}
+            # valida compose
+            env | grep -E '^(GITHUB_OWNER|GITHUB_REPO|IMAGE_TAG)=' || true
+            docker compose -f docker-compose.prod.yml config >/dev/null
 
-            # Observability
-            SENTRY_DSN=${SENTRY_DSN}
-            SENTRY_TRACES_SAMPLE_RATE=${SENTRY_TRACES_SAMPLE_RATE}
-            SENTRY_PROFILES_SAMPLE_RATE=${SENTRY_PROFILES_SAMPLE_RATE}
+            # puxa imagem pela tag do commit SHA
+            docker compose -f docker-compose.prod.yml pull api
 
-            # Auth (OIDC/JWT)
-            AUTH_ISSUER=${AUTH_ISSUER}
-            AUTH_AUDIENCE=${AUTH_AUDIENCE}
-            JWKS_URL=${JWKS_URL}
-            # ==== end ====
-            EOF
-            mv "$tmpenv" "$ENV_FILE"
+            # sobe/atualiza serviço
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
-            echo "Env keys presentes no ${ENV_FILE}:"
-            sed -E 's/^(.*)=.*$/\1=****/' "$ENV_FILE" | grep -v '^\s*$' || true
+            # migrações (se Alembic estiver no container)
+            docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head || true
 
-            # 2) Login no GHCR e rollout
-            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+            # limpeza básica
+            docker image prune -f || true
 
-            cd "$APP_DIR"
-            docker compose pull
-            docker compose up -d --remove-orphans
-            docker image prune -f
-
-            # 3) Aguarda container ficar running (até 60s)
-            for i in $(seq 1 30); do
-              if docker compose ps --status=running | grep -q "\b${SERVICE}\b"; then
-                echo "Serviço ${SERVICE} está em execução."
-                break
-              fi
-              sleep 2
-              if [ "$i" -eq 30 ]; then
-                echo "Serviço ${SERVICE} não ficou running a tempo."
-                docker compose ps || true
-                exit 1
-              fi
-            done
-
-            # 4) Healthcheck: tenta Docker HEALTHCHECK, senão cai no /healthz interno
-            CID="$(docker compose ps -q "${SERVICE}" || true)"
-            if [ -n "${CID}" ] && docker inspect "${CID}" | grep -q '"Health"'; then
-              echo "Aguardando HEALTHCHECK do Docker ficar healthy..."
-              for i in $(seq 1 60); do
-                status="$(docker inspect -f '{{.State.Health.Status}}' "${CID}" || echo unknown)"
-                echo "Health status: ${status}"
-                [ "${status}" = "healthy" ] && { echo "Health OK (Docker HEALTHCHECK)."; break; }
-                sleep 2
-                if [ "$i" -eq 60 ]; then
-                  echo "Health do Docker não ficou healthy em tempo hábil."
-                  docker logs --tail=200 "${CID}" || true
-                  echo "Variáveis de ambiente no container:"
-                  docker exec "${CID}" /bin/sh -lc 'env | sed -E "s/^(.*)=.*$/\1=****/" | sort' || true
-                  exit 1
-                fi
-              done
-            else
-              echo "Sem HEALTHCHECK; testando endpoint /healthz de dentro do container…"
-              for i in $(seq 1 60); do
-                if docker compose exec -T "${SERVICE}" sh -lc 'curl -fsS http://127.0.0.1:8000/healthz >/dev/null'; then
-                  echo "Local health OK (in-container)."
-                  break
-                fi
-                sleep 2
-                if [ "$i" -eq 60 ]; then
-                  echo "Health interno falhou."
-                  [ -n "${CID}" ] && docker logs --tail=200 "${CID}" || true
-                  docker compose ps || true
-                  exit 1
-                fi
-              done
-            fi
-
-      - name: Public smoke test (HTTPS)
-        shell: bash
+      - name: Public healthcheck
         run: |
-          for i in {1..60}; do
-            code=$(curl -sk -o /dev/null -w "%{http_code}" "${PUBLIC_HEALTH_URL}")
+          for i in {1..20}; do
+            code=$(curl -ks -o /dev/null -w "%{http_code}" "${{ secrets.PUBLIC_HEALTH_URL }}")
             if [ "$code" = "200" ]; then
-              echo "OK ${PUBLIC_HEALTH_URL}"
-              curl -fsS "${PUBLIC_HEALTH_URL}"
+              echo "OK: healthcheck passou."
               exit 0
             fi
-            sleep 2
+            echo "Aguardando saúde (tentativa $i)..."
+            sleep 6
           done
-          echo "Falha no smoke test público em ${PUBLIC_HEALTH_URL}"
+          echo "FALHA: healthcheck não retornou 200."
           exit 1

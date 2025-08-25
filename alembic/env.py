@@ -1,11 +1,9 @@
 # alembic/env.py
 from __future__ import annotations
-
 import os
 import sys
 import pathlib
 from logging.config import fileConfig
-
 from alembic import context
 
 # Garante que o pacote "app" seja importável mesmo rodando de /alembic
