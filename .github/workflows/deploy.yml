@@ -98,10 +98,10 @@ jobs:
             set -euo pipefail
 
             APP_DIR="/home/pedroct/apps/apontamentos-api"
-            SERVICE="api"  # nome do serviço no docker-compose.yml
-            ENV_FILE="${APP_DIR}/.env"   # docker compose lê .env por padrão nesse diretório
+            SERVICE="api"                            # nome do serviço no docker-compose.yml
+            ENV_FILE="${APP_DIR}/.env"               # docker compose lê .env por padrão nesse diretório
 
-            # 1) Atualiza/gera .env com valores REAIS (heredoc sem aspas para interpolar)
+            # 1) Atualiza/gera .env com valores REAIS
             install -d -m 0755 "$APP_DIR"
             umask 077
             tmpenv="$(mktemp)"
@@ -132,63 +132,59 @@ jobs:
             EOF
             mv "$tmpenv" "$ENV_FILE"
 
-            # 2) (Opcional) Mostra apenas as CHAVES presentes (sem vazar valores)
             echo "Env keys presentes no ${ENV_FILE}:"
             sed -E 's/^(.*)=.*$/\1=****/' "$ENV_FILE" | grep -v '^\s*$' || true
 
-            # 3) Login no GHCR e rollout
+            # 2) Login no GHCR e rollout
             echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
 
             cd "$APP_DIR"
-
-            # Garante que o docker-compose está apontando para a tag 'latest' do IMAGE (caso use variável)
-            # e faz rollout
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
 
-            # 4) Aguarda container ficar running
-            for i in {1..30}; do
-              if docker compose ps --status=running | grep -q "$SERVICE"; then
-                echo "Serviço $SERVICE está em execução."
+            # 3) Aguarda container ficar running (até 60s)
+            for i in $(seq 1 30); do
+              if docker compose ps --status=running | grep -q "\b${SERVICE}\b"; then
+                echo "Serviço ${SERVICE} está em execução."
                 break
               fi
               sleep 2
               if [ "$i" -eq 30 ]; then
-                echo "Serviço $SERVICE não ficou running a tempo."
+                echo "Serviço ${SERVICE} não ficou running a tempo."
                 docker compose ps || true
                 exit 1
               fi
             done
 
-            # 5) Healthcheck do Docker (ou fallback interno)
-            CID=$(docker compose ps -q "$SERVICE" || true)
-            if [ -n "$CID" ] && docker inspect "$CID" | grep -q '"Health"'; then
+            # 4) Healthcheck: tenta Docker HEALTHCHECK, senão cai no /healthz interno
+            CID="$(docker compose ps -q "${SERVICE}" || true)"
+            if [ -n "${CID}" ] && docker inspect "${CID}" | grep -q '"Health"'; then
               echo "Aguardando HEALTHCHECK do Docker ficar healthy..."
-              for i in {1..60}; do
-                status=$(docker inspect -f '{{.State.Health.Status}}' "$CID" || echo "unknown")
-                echo "Health status: $status"
-                [ "$status" = "healthy" ] && { echo "Health OK (Docker HEALTHCHECK)."; break; }
+              for i in $(seq 1 60); do
+                status="$(docker inspect -f '{{.State.Health.Status}}' "${CID}" || echo unknown)"
+                echo "Health status: ${status}"
+                [ "${status}" = "healthy" ] && { echo "Health OK (Docker HEALTHCHECK)."; break; }
                 sleep 2
                 if [ "$i" -eq 60 ]; then
                   echo "Health do Docker não ficou healthy em tempo hábil."
-                  docker logs --tail=200 "$CID" || true
+                  docker logs --tail=200 "${CID}" || true
                   echo "Variáveis de ambiente no container:"
-                  docker exec "$CID" /bin/sh -lc 'env | sed -E "s/^(.*)=.*$/\1=****/" | sort' || true
+                  docker exec "${CID}" /bin/sh -lc 'env | sed -E "s/^(.*)=.*$/\1=****/" | sort' || true
                   exit 1
                 fi
               done
             else
-              echo "Sem HEALTHCHECK no Docker; testando endpoint /healthz de dentro do container…"
-              for i in {1..60}; do
-                if docker compose exec -T "$SERVICE" sh -lc 'curl -fsS http://127.0.0.1:8000/healthz >/dev/null'; then
+              echo "Sem HEALTHCHECK; testando endpoint /healthz de dentro do container…"
+              for i in $(seq 1 60); do
+                if docker compose exec -T "${SERVICE}" sh -lc 'curl -fsS http://127.0.0.1:8000/healthz >/dev/null'; then
                   echo "Local health OK (in-container)."
                   break
                 fi
                 sleep 2
                 if [ "$i" -eq 60 ]; then
                   echo "Health interno falhou."
-                  [ -n "$CID" ] && docker logs --tail=200 "$CID" || true
+                  [ -n "${CID}" ] && docker logs --tail=200 "${CID}" || true
                   docker compose ps || true
                   exit 1
                 fi
