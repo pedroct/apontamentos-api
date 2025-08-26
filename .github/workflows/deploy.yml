@@ -150,7 +150,7 @@ jobs:
           set -u
           URL="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/healthz}"
           echo "Checando: $URL"
-          for i in {1..20}; do
+          for i in {1..5}; do
             # timeouts curtos e não deixar o -e do runner matar o loop se falhar
             code=$(curl -ks -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "$URL" || echo 000)
             echo "Tentativa $i/20 -> HTTP $code"
