@@ -153,7 +153,7 @@ jobs:
           for i in {1..5}; do
             # timeouts curtos e não deixar o -e do runner matar o loop se falhar
             code=$(curl -ks -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "$URL" || echo 000)
-            echo "Tentativa $i/20 -> HTTP $code"
+            echo "Tentativa $i/5 -> HTTP $code"
             if [ "$code" = "200" ]; then
               echo "OK: healthcheck passou."
               exit 0
