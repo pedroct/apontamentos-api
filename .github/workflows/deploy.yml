@@ -106,7 +106,7 @@ jobs:
           script: |
             set -euxo pipefail
 
-            COMPOSE_DIR= "${{ secrets.COMPOSE_DIR }}"
+            COMPOSE_DIR= "/home/pedroct/apps/apontamentos-api"
             if [ -z "${COMPOSE_DIR}" ]; then COMPOSE_DIR="/home/pedroct/apps/apontamentos-api"; fi
 
             GITHUB_OWNER="${{ steps.prep.outputs.owner }}"
