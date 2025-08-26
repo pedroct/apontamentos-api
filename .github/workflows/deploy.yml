@@ -78,13 +78,27 @@ jobs:
           echo "repo=$REPO" >> $GITHUB_OUTPUT
           echo "short_sha=${{ needs.build-and-push.outputs.short_sha }}" >> $GITHUB_OUTPUT
 
+      - name: Cache server host key (port 2222)
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -p 2222 "api-apontamentos.pedroct.com.br" >> ~/.ssh/known_hosts
+
+      - name: Check SSH connectivity (TCP 2222)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          getent ahostsv4 "api-apontamentos.pedroct.com.br" || true
+          timeout 10 bash -c "exec 3<>/dev/tcp/api-apontamentos.pedroct.com.br/2222" && echo "TCP 2222 open"
+
       - name: SSH | Pull & Restart
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_USER }}
+          host: api-apontamentos.pedroct.com.br #${{ secrets.PROD_HOST }}
+          username: pedroct #${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
-          port: ${{ secrets.PROD_SSH_PORT }}
+          port: 2222 #${{ secrets.PROD_SSH_PORT }}
           script_stop: true
           timeout: 5m
           command_timeout: 20m
@@ -92,7 +106,7 @@ jobs:
           script: |
             set -euxo pipefail
 
-            COMPOSE_DIR="${{ secrets.COMPOSE_DIR }}"
+            COMPOSE_DIR= "${{ secrets.COMPOSE_DIR }}"
             if [ -z "${COMPOSE_DIR}" ]; then COMPOSE_DIR="/home/pedroct/apps/apontamentos-api"; fi
 
             GITHUB_OWNER="${{ steps.prep.outputs.owner }}"
