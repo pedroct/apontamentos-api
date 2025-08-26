@@ -146,6 +146,8 @@ jobs:
             docker image prune -f || true
 
       - name: Public healthcheck
+        env:
+          PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
         run: |
           set -u
           URL="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/healthz}"
