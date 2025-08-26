@@ -13,15 +13,21 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   IMAGE: ghcr.io/${{ github.repository }}
+  GHCR_USERNAME: ${{ github.actor }}
+  #GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
-      sha: ${{ github.sha }}
+      short_sha: ${{ steps.vars.outputs.short_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: vars
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -58,16 +64,19 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+    # não use secrets aqui no environment.url; deixe só o nome
     environment:
       name: production
-      url: ${{ secrets.PUBLIC_HEALTH_URL }}
+    env:
+      PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}  # ok usar em env de job
     steps:
       - name: Derive repo vars
         id: prep
         run: |
           IFS='/' read -r OWNER REPO <<< "${GITHUB_REPOSITORY}"
-          echo "OWNER=$OWNER" >> $GITHUB_OUTPUT
-          echo "REPO=$REPO" >> $GITHUB_OUTPUT
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
+          echo "short_sha=${{ needs.build-and-push.outputs.short_sha }}" >> $GITHUB_OUTPUT
 
       - name: SSH | Pull & Restart
         uses: appleboy/ssh-action@v1.2.0
@@ -80,27 +89,27 @@ jobs:
           script: |
             set -euxo pipefail
 
-            export COMPOSE_DIR="${{ secrets.COMPOSE_DIR || '/home/pedroct/apps/apontamentos-api' }}"
-            export GITHUB_OWNER="${{ steps.prep.outputs.OWNER }}"
-            export GITHUB_REPO="${{ steps.prep.outputs.REPO }}"
-            export IMAGE_TAG="${{ needs.build-and-push.outputs.sha }}"
+            COMPOSE_DIR="${{ secrets.COMPOSE_DIR }}"
+            if [ -z "${COMPOSE_DIR}" ]; then COMPOSE_DIR="/home/pedroct/apps/apontamentos-api"; fi
+
+            GITHUB_OWNER="${{ steps.prep.outputs.owner }}"
+            GITHUB_REPO="${{ steps.prep.outputs.repo }}"
+            IMAGE_TAG="${{ steps.prep.outputs.short_sha }}"  # casa com tag 'sha curto'
 
             cd "$COMPOSE_DIR"
 
             # login no GHCR (imagens privadas)
             echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.PROD_GHCR_USER }}" --password-stdin
 
-            # valida compose
-            env | grep -E '^(GITHUB_OWNER|GITHUB_REPO|IMAGE_TAG)=' || true
+            # valida compose e exporta variáveis usadas no arquivo
+            export GITHUB_OWNER GITHUB_REPO IMAGE_TAG
             docker compose -f docker-compose.prod.yml config >/dev/null
 
-            # puxa imagem pela tag do commit SHA
+            # pull + up com o compose de produção
             docker compose -f docker-compose.prod.yml pull api
-
-            # sobe/atualiza serviço
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
-            # migrações (se Alembic estiver no container)
+            # migrações (opcional — só se o Alembic estiver na imagem)
             docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head || true
 
             # limpeza básica
@@ -108,8 +117,10 @@ jobs:
 
       - name: Public healthcheck
         run: |
+          URL="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/}"
+          echo "Checando: $URL"
           for i in {1..20}; do
-            code=$(curl -ks -o /dev/null -w "%{http_code}" "${{ secrets.PUBLIC_HEALTH_URL }}")
+            code=$(curl -ks -o /dev/null -w "%{http_code}" "$URL")
             if [ "$code" = "200" ]; then
               echo "OK: healthcheck passou."
               exit 0
