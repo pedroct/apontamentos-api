@@ -14,7 +14,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   IMAGE: ghcr.io/${{ github.repository }}
   GHCR_USERNAME: ${{ github.actor }}
-  #GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   build-and-push:
@@ -49,7 +48,10 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=prod-latest
+            # publica também sha-<short>
             type=sha,format=short
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -64,11 +66,12 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
-    # não use secrets aqui no environment.url; deixe só o nome
     environment:
       name: production
     env:
-      PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}  # ok usar em env de job
+      PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
+      # token com permissão de read:packages no GHCR
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Derive repo vars
         id: prep
@@ -103,6 +106,7 @@ jobs:
           timeout: 5m
           command_timeout: 20m
           debug: true
+          envs: GHCR_USERNAME,GHCR_TOKEN
           script: |
             set -euxo pipefail
 
@@ -111,31 +115,38 @@ jobs:
 
             GITHUB_OWNER="${{ steps.prep.outputs.owner }}"
             GITHUB_REPO="${{ steps.prep.outputs.repo }}"
-            IMAGE_TAG="${{ needs.build-and-push.outputs.short_sha }}"
+            SHORT_SHA="${{ steps.prep.outputs.short_sha }}"
+            IMAGE_TAG="prod-latest"
 
             cd "$COMPOSE_DIR"
 
             # login no GHCR (imagens privadas)
-            echo "${{ secrets.PROD_GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.PROD_GHCR_USER }}" --password-stdin
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
 
-            # valida compose e exporta variáveis usadas no arquivo
+            echo "Verificando tag: ghcr.io/${GITHUB_OWNER}/${GITHUB_REPO}:${IMAGE_TAG}"
+            if ! docker manifest inspect "ghcr.io/${GITHUB_OWNER}/${GITHUB_REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
+              echo "prod-latest ausente; tentando fallback para sha-${SHORT_SHA}"
+              if docker manifest inspect "ghcr.io/${GITHUB_OWNER}/${GITHUB_REPO}:sha-${SHORT_SHA}" >/dev/null 2>&1; then
+                IMAGE_TAG="sha-${SHORT_SHA}"
+              else
+                echo "Nenhuma tag válida encontrada (prod-latest nem sha-${SHORT_SHA})."
+                exit 1
+              fi
+            fi
+
             export GITHUB_OWNER GITHUB_REPO IMAGE_TAG
             docker compose -f docker-compose.prod.yml config >/dev/null
 
-            # pull + up com o compose de produção
             docker compose -f docker-compose.prod.yml pull api
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
-            # migrações (opcional — só se o Alembic estiver na imagem)
             docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head || true
 
-            # limpeza básica
             docker image prune -f || true
-
 
       - name: Public healthcheck
         run: |
-          URL="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/}"
+          URL="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/healthz}"
           echo "Checando: $URL"
           for i in {1..20}; do
             code=$(curl -ks -o /dev/null -w "%{http_code}" "$URL")
