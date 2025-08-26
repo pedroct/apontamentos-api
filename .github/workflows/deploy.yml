@@ -150,17 +150,21 @@ jobs:
           PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
         run: |
           set -u
-          URL="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/healthz}"
+          URL_RAW="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/healthz}"
+          # remove CR/LF e espaços
+          URL="$(printf '%s' "$URL_RAW" | tr -d '\r' | xargs)"
           echo "Checando: $URL"
           for i in {1..5}; do
-            # timeouts curtos e não deixar o -e do runner matar o loop se falhar
             code=$(curl -ks -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "$URL" || echo 000)
             echo "Tentativa $i/5 -> HTTP $code"
-            if [ "$code" = "200" ]; then
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
               echo "OK: healthcheck passou."
               exit 0
             fi
-            sleep 6
+            sleep 5
           done
-          echo "FALHA: healthcheck não retornou 200 após 20 tentativas."
+          echo "FALHA: healthcheck não retornou 2xx."
+          # Último diagnóstico
+          echo "Debug final cURL:"
+          curl -kv --connect-timeout 5 --max-time 8 "$URL" || true
           exit 1
