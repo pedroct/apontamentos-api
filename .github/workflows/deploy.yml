@@ -95,10 +95,10 @@ jobs:
       - name: SSH | Pull & Restart
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: api-apontamentos.pedroct.com.br #${{ secrets.PROD_HOST }}
-          username: pedroct #${{ secrets.PROD_USER }}
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
-          port: 2222 #${{ secrets.PROD_SSH_PORT }}
+          port: 2222
           script_stop: true
           timeout: 5m
           command_timeout: 20m
@@ -106,17 +106,17 @@ jobs:
           script: |
             set -euxo pipefail
 
-            COMPOSE_DIR= "/home/pedroct/apps/apontamentos-api"
-            if [ -z "${COMPOSE_DIR}" ]; then COMPOSE_DIR="/home/pedroct/apps/apontamentos-api"; fi
+            COMPOSE_DIR="${{ secrets.COMPOSE_DIR }}"
+            if [ -z "$COMPOSE_DIR" ]; then COMPOSE_DIR="/home/pedroct/apps/apontamentos-api"; fi
 
             GITHUB_OWNER="${{ steps.prep.outputs.owner }}"
             GITHUB_REPO="${{ steps.prep.outputs.repo }}"
-            IMAGE_TAG="${{ steps.prep.outputs.short_sha }}"  # casa com tag 'sha curto'
+            IMAGE_TAG="${{ needs.build-and-push.outputs.short_sha }}"
 
             cd "$COMPOSE_DIR"
 
             # login no GHCR (imagens privadas)
-            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.PROD_GHCR_USER }}" --password-stdin
+            echo "${{ secrets.PROD_GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.PROD_GHCR_USER }}" --password-stdin
 
             # valida compose e exporta variáveis usadas no arquivo
             export GITHUB_OWNER GITHUB_REPO IMAGE_TAG
@@ -131,6 +131,7 @@ jobs:
 
             # limpeza básica
             docker image prune -f || true
+
 
       - name: Public healthcheck
         run: |
