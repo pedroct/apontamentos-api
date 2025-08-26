@@ -14,6 +14,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   IMAGE: ghcr.io/${{ github.repository }}
   GHCR_USERNAME: ${{ github.actor }}
+  DATABASE_URL: postgresql+psycopg://apontamentos_user:w8UDk3rN7uYx5zZ9L6M2@localhost:5433/apontamentos_db
 
 jobs:
   build-and-push:
@@ -146,16 +147,18 @@ jobs:
 
       - name: Public healthcheck
         run: |
+          set -u
           URL="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/healthz}"
           echo "Checando: $URL"
           for i in {1..20}; do
-            code=$(curl -ks -o /dev/null -w "%{http_code}" "$URL")
+            # timeouts curtos e não deixar o -e do runner matar o loop se falhar
+            code=$(curl -ks -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "$URL" || echo 000)
+            echo "Tentativa $i/20 -> HTTP $code"
             if [ "$code" = "200" ]; then
               echo "OK: healthcheck passou."
               exit 0
             fi
-            echo "Aguardando saúde (tentativa $i)..."
             sleep 6
           done
-          echo "FALHA: healthcheck não retornou 200."
+          echo "FALHA: healthcheck não retornou 200 após 20 tentativas."
           exit 1
