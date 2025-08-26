@@ -86,6 +86,9 @@ jobs:
           key: ${{ secrets.PROD_SSH_KEY }}
           port: ${{ secrets.PROD_SSH_PORT }}
           script_stop: true
+          timeout: 5m
+          command_timeout: 20m
+          debug: true
           script: |
             set -euxo pipefail
 
