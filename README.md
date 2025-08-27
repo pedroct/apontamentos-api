@@ -24,3 +24,4 @@ make run
   - `AUTH_AUDIENCE=api://sgs`
 
 Se quiser, eu já te devolvo tudo zipado com os nomes trocados certinho para **apontamentos-api** e **sgs-api**.
+# ping
