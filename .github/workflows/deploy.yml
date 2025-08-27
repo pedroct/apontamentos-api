@@ -1,9 +1,16 @@
-name: Deploy to Production
+name: Build & Deploy (EC2)
 
 on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      deploy_strategy:
+        description: "Estratégia de deploy"
+        type: choice
+        required: true
+        default: ssh
+        options: [ ssh, rsync ]
 
 permissions:
   contents: read
@@ -11,160 +18,126 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-  IMAGE: ghcr.io/${{ github.repository }}
-  GHCR_USERNAME: ${{ github.actor }}
-  DATABASE_URL: postgresql+psycopg://apontamentos_user:w8UDk3rN7uYx5zZ9L6M2@localhost:5433/apontamentos_db
 
 jobs:
-  build-and-push:
+  build:
+    name: Build & Push Image to GHCR
     runs-on: ubuntu-latest
     outputs:
-      short_sha: ${{ steps.vars.outputs.short_sha }}
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      tag_latest: ${{ steps.meta.outputs.tag_latest }}
+      tag_stamp: ${{ steps.meta.outputs.tag_stamp }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Compute short SHA
-        id: vars
-        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - id: meta
+        shell: bash
+        run: |
+          REPO_LOWER="${GITHUB_REPOSITORY,,}"
+          echo "image_uri=${{ env.REGISTRY }}/${REPO_LOWER}" >> "$GITHUB_OUTPUT"
+          echo "tag_latest=prod-latest"                     >> "$GITHUB_OUTPUT"
+          echo "tag_stamp=prod-$(date -u +%Y%m%d%H%M)"      >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
+      - name: Login to GHCR (builder)
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=raw,value=prod-latest
-            # publica também sha-<short>
-            type=sha,format=short
-          labels: |
-            org.opencontainers.image.source=${{ github.repository }}
-
-      - name: Build and push image
+      - name: Build & Push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.tag_latest }}
+            ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.tag_stamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    needs: build-and-push
+  deploy_ssh:
+    name: Deploy via SSH (appleboy)
+    environment: production
+    needs: build
+    if: ${{ github.event_name == 'push' || inputs.deploy_strategy == 'ssh' }}
     runs-on: ubuntu-latest
-    environment:
-      name: production
-    env:
-      PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
-      # token com permissão de read:packages no GHCR
-      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Derive repo vars
-        id: prep
-        run: |
-          IFS='/' read -r OWNER REPO <<< "${GITHUB_REPOSITORY}"
-          echo "owner=$OWNER" >> $GITHUB_OUTPUT
-          echo "repo=$REPO" >> $GITHUB_OUTPUT
-          echo "short_sha=${{ needs.build-and-push.outputs.short_sha }}" >> $GITHUB_OUTPUT
-
-      - name: Cache server host key (port 2222)
-        shell: bash
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          ssh-keyscan -p 2222 "api-apontamentos.pedroct.com.br" >> ~/.ssh/known_hosts
-
-      - name: Check SSH connectivity (TCP 2222)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          getent ahostsv4 "api-apontamentos.pedroct.com.br" || true
-          timeout 10 bash -c "exec 3<>/dev/tcp/api-apontamentos.pedroct.com.br/2222" && echo "TCP 2222 open"
-
-      - name: SSH | Pull & Restart
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Executa deploy na EC2
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          port: 2222
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
           script_stop: true
-          timeout: 5m
-          command_timeout: 20m
-          debug: true
-          envs: GHCR_USERNAME,GHCR_TOKEN
           script: |
-            set -euxo pipefail
+            set -euo pipefail
+            # Vars do Environment production
+            export APP_DIR="${{ vars.APP_DIR }}"
+            export ENVFILE="${{ vars.ENVFILE }}"
+            export COMPOSE="${{ vars.COMPOSE }}"
+            export DB_SERVICE="${{ vars.DB_SERVICE }}"
+            export API_SERVICE="${{ vars.API_SERVICE }}"
+            export HEALTH_LOCAL="${{ vars.HEALTH_LOCAL }}"
+            export READY_LOCAL="${{ vars.READY_LOCAL }}"
+            export HEALTH_PUBLIC="${{ vars.HEALTH_URL }}"
+            export WAIT_DB_RETRIES="${{ vars.WAIT_DB_RETRIES }}"
+            export WAIT_DB_INTERVAL="${{ vars.WAIT_DB_INTERVAL }}"
+            export NGINX_RELOAD="${{ vars.NGINX_RELOAD }}"
+            export CURL_INSECURE="${{ vars.CURL_INSECURE }}"
+            # Secrets p/ docker pull
+            export GHCR_USER="${{ secrets.GHCR_USER }}"
+            export GHCR_PAT="${{ secrets.GHCR_PAT }}"
 
-            COMPOSE_DIR="${{ secrets.COMPOSE_DIR }}"
-            if [ -z "$COMPOSE_DIR" ]; then COMPOSE_DIR="/home/pedroct/apps/apontamentos-api"; fi
-
-            GITHUB_OWNER="${{ steps.prep.outputs.owner }}"
-            GITHUB_REPO="${{ steps.prep.outputs.repo }}"
-            SHORT_SHA="${{ steps.prep.outputs.short_sha }}"
-            IMAGE_TAG="prod-latest"
-
-            cd "$COMPOSE_DIR"
-
-            # login no GHCR (imagens privadas)
-            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
-
-            echo "Verificando tag: ghcr.io/${GITHUB_OWNER}/${GITHUB_REPO}:${IMAGE_TAG}"
-            if ! docker manifest inspect "ghcr.io/${GITHUB_OWNER}/${GITHUB_REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
-              echo "prod-latest ausente; tentando fallback para sha-${SHORT_SHA}"
-              if docker manifest inspect "ghcr.io/${GITHUB_OWNER}/${GITHUB_REPO}:sha-${SHORT_SHA}" >/dev/null 2>&1; then
-                IMAGE_TAG="sha-${SHORT_SHA}"
-              else
-                echo "Nenhuma tag válida encontrada (prod-latest nem sha-${SHORT_SHA})."
-                exit 1
-              fi
+            # Login GHCR (não-interativo)
+            if [ -n "${GHCR_USER:-}" ] && [ -n "${GHCR_PAT:-}" ]; then
+              echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || true
             fi
 
-            export GITHUB_OWNER GITHUB_REPO IMAGE_TAG
-            docker compose -f docker-compose.prod.yml config >/dev/null
+            chmod +x "${APP_DIR:-/home/pedroct/apps/apontamentos-api}/deploy.sh"
+            "${APP_DIR:-/home/pedroct/apps/apontamentos-api}/deploy.sh"
 
-            docker compose -f docker-compose.prod.yml pull api
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+  deploy_rsync:
+    name: Deploy via RSYNC + SSH
+    environment: production
+    needs: build
+    if: ${{ github.event_name == 'push' || inputs.deploy_strategy == 'rsync' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-            docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head || true
+      - name: RSYNC para EC2
+        uses: burnett01/rsync-deploy@5.2
+        with:
+          switches: -avzr --delete
+          path: |
+            docker-compose.prod.yml
+            deploy.sh
+            alembic.ini
+            alembic/versions/
+          remote_path: ${{ vars.APP_DIR }}
+          remote_host: ${{ secrets.SSH_HOST }}
+          remote_user: ${{ secrets.SSH_USER }}
+          remote_key: ${{ secrets.SSH_KEY }}
+          remote_port: ${{ secrets.SSH_PORT || 22 }}
 
-            docker image prune -f || true
-
-      - name: Public healthcheck
-        env:
-          PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
-        run: |
-          set -u
-          URL_RAW="${PUBLIC_HEALTH_URL:-https://api-apontamentos.pedroct.com.br/healthz}"
-          # remove CR/LF e espaços
-          URL="$(printf '%s' "$URL_RAW" | tr -d '\r' | xargs)"
-          echo "Checando: $URL"
-          for i in {1..5}; do
-            code=$(curl -ks -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 8 "$URL" || echo 000)
-            echo "Tentativa $i/5 -> HTTP $code"
-            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
-              echo "OK: healthcheck passou."
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "FALHA: healthcheck não retornou 2xx."
-          # Último diagnóstico
-          echo "Debug final cURL:"
-          curl -kv --connect-timeout 5 --max-time 8 "$URL" || true
-          exit 1
+      - name: Executa deploy na EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export APP_DIR="${{ vars.APP_DIR }}"
+            export GHCR_USER="${{ secrets.GHCR_USER }}"
+            export GHCR_PAT="${{ secrets.GHCR_PAT }}"
+            [ -n "${GHCR_USER:-}" ] && [ -n "${GHCR_PAT:-}" ] && \
+              echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || true
+            chmod +x "$APP_DIR/deploy.sh" && cd "$APP_DIR" && ./deploy.sh
